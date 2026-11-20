@@ -1,0 +1,65 @@
+[
+  {
+    "row_id": 17,
+    "field": "local_currency",
+    "severity": "corrected",
+    "message": "corrected currency typo 'GPB' -> 'GBP'",
+    "raw_value": "GPB"
+  },
+  {
+    "row_id": 21,
+    "field": "cashflow_date",
+    "severity": "corrected",
+    "message": "normalised date ' 30/09/2030  00:00:00' -> 2030-09-30 (format '%d/%m/%Y %H:%M:%S')",
+    "raw_value": " 30/09/2030  00:00:00"
+  },
+  {
+    "row_id": 51,
+    "field": "cashflow_date",
+    "severity": "corrected",
+    "message": "normalised date '30/09/2027  00:00:00`' -> 2027-09-30 (format '%d/%m/%Y %H:%M:%S')",
+    "raw_value": "30/09/2027  00:00:00`"
+  },
+  {
+    "row_id": null,
+    "field": "__position__",
+    "severity": "warning",
+    "message": "position Fund I/GBP: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection",
+    "raw_value": null
+  },
+  {
+    "row_id": null,
+    "field": "__position__",
+    "severity": "warning",
+    "message": "position Fund I/EUR: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection",
+    "raw_value": null
+  },
+  {
+    "row_id": null,
+    "field": "__position__",
+    "severity": "warning",
+    "message": "position Fund I/USD: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection",
+    "raw_value": null
+  },
+  {
+    "row_id": null,
+    "field": "__position__",
+    "severity": "warning",
+    "message": "position Fund II/GBP: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection",
+    "raw_value": null
+  },
+  {
+    "row_id": null,
+    "field": "__position__",
+    "severity": "warning",
+    "message": "position Fund II/EUR: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection",
+    "raw_value": null
+  },
+  {
+    "row_id": null,
+    "field": "__position__",
+    "severity": "warning",
+    "message": "position Fund II/USD: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection",
+    "raw_value": null
+  }
+]
