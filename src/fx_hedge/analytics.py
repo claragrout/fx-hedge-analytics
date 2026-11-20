@@ -113,7 +113,7 @@ def position_fx_rate(records: Sequence[CashflowRecord]) -> float:
     rounding error. (Dataset validation has already checked that all rows
     agree within tolerance.)
     """
-    largest = max(records, key=lambda r: abs(r.amount_local))
+    largest = max(records, key=lambda r: abs(r.cashflow_amount_local))
     return largest.implied_fx_rate
 
 
@@ -122,7 +122,7 @@ def nav_schedule(
     rate: float | None = None,
     dates: Sequence[dt.date] | None = None,
 ) -> list[NavPoint]:
-    """NAV schedule for a single (fund, currency) position.
+    """NAV schedule for one fund's cashflows in one currency.
 
     ``dates`` defaults to every cashflow date of the position. ``NAV(t0)`` is
     set to exactly 0 per the specification. The computed value is asserted
@@ -130,12 +130,12 @@ def nav_schedule(
     """
     if not records:
         return []
-    keys = {r.position_key for r in records}
+    keys = {(r.fund_name, r.local_currency) for r in records}
     if len(keys) != 1:
-        raise ValueError(f"nav_schedule expects a single position, got {sorted(keys)}")
+        raise ValueError(f"nav_schedule expects one fund and currency, got {sorted(keys)}")
     fund, ccy = next(iter(keys))
 
-    flows = aggregate_by_date([(r.cashflow_date, r.amount_local) for r in records])
+    flows = aggregate_by_date([(r.date, r.cashflow_amount_local) for r in records])
     if rate is None:
         rate = xirr(flows)
     fx = position_fx_rate(records)
@@ -185,8 +185,8 @@ def compute_fund_analytics(records: Sequence[CashflowRecord], fund_name: str) ->
     currencies: list[CurrencyAnalytics] = []
     for ccy in sorted(by_ccy):
         rows = by_ccy[ccy]
-        local_flows = [(r.cashflow_date, r.amount_local) for r in rows]
-        base_flows = [(r.cashflow_date, r.amount_base) for r in rows]
+        local_flows = [(r.date, r.cashflow_amount_local) for r in rows]
+        base_flows = [(r.date, r.cashflow_amount_base) for r in rows]
         irr = xirr(local_flows)
         currencies.append(
             CurrencyAnalytics(
@@ -198,7 +198,7 @@ def compute_fund_analytics(records: Sequence[CashflowRecord], fund_name: str) ->
             )
         )
 
-    fund_irr = xirr([(r.cashflow_date, r.amount_base) for r in fund_records])
+    fund_irr = xirr([(r.date, r.cashflow_amount_base) for r in fund_records])
     return FundAnalytics(fund_name=fund_name, base_currency=base, fund_irr=fund_irr, currencies=currencies)
 
 

@@ -24,13 +24,13 @@ def fund1(sample_result: IngestionResult) -> FundAnalytics:
 
 def make_record(row_id: int = 1, **overrides) -> CashflowRecord:
     data = {
-        "row_id": row_id,
+        "id": row_id,
         "fund_name": "Fund T",
-        "cashflow_date": dt.date(2025, 9, 30),
+        "date": "30/09/2025 00:00",
         "cashflow_type": "Interest",
         "local_currency": "GBP",
-        "amount_local": 100.0,
-        "amount_base": 115.0,
+        "cashflow_amount_local": 100.0,
+        "cashflow_amount_base": 115.0,
         "base_currency": "EUR",
     }
     data.update(overrides)
@@ -58,13 +58,13 @@ def bond_records(
     rate = 1.0 if ccy == base else fx
     return [
         CashflowRecord(
-            row_id=i + 1,
+            id=i + 1,
             fund_name=fund,
-            cashflow_date=d,
+            date=d.strftime("%d/%m/%Y 00:00"),
             cashflow_type=t,
             local_currency=ccy,
-            amount_local=a,
-            amount_base=a * rate,
+            cashflow_amount_local=a,
+            cashflow_amount_base=a * rate,
             base_currency=base,
         )
         for i, (t, d, a) in enumerate(rows)

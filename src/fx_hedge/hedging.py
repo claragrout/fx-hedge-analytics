@@ -1,8 +1,8 @@
-"""FX hedge recommendations: 3-month rolling forwards at a % of NAV.
+"""FX hedge recommendations: 3-month rolling forwards at 100% of NAV.
 
 For each non-base currency position the fund is long the local-currency NAV,
 so the hedge SELLS local / BUYS base forward. At each roll date ``t`` a new
-forward is struck for ``hedge_ratio x NAV_ex(t)``. That is the value still
+forward is struck for ``NAV_ex(t)``. That is the value still
 outstanding after any cashflow paid on ``t``, which is the exposure carried
 over the next quarter. The forward matures at the next roll date, where it is
 settled and replaced (the "roll").
@@ -54,25 +54,22 @@ def trade_id(fund: str, ccy: str, trade_date: dt.date, maturity: dt.date, versio
 def generate_hedges(
     records: Sequence[CashflowRecord],
     analytics: FundAnalytics,
-    hedge_ratio: float = 1.0,
     tenor_months: int = 3,
     projection_version: str = "v1",
 ) -> list[HedgeTrade]:
-    if not 0.0 <= hedge_ratio <= 1.5:
-        raise ValueError("hedge_ratio outside sane bounds [0, 1.5]")
     base = analytics.base_currency
     trades: list[HedgeTrade] = []
     for ca in analytics.currencies:
         if ca.currency == base:
             continue
         rows = [r for r in records if r.fund_name == analytics.fund_name and r.local_currency == ca.currency]
-        flows = [(r.cashflow_date, r.amount_local) for r in rows]
+        flows = [(r.date, r.cashflow_amount_local) for r in rows]
         rate = ca.irr if ca.irr is not None else xirr(flows)
         fx = ca.nav_schedule[0].fx_rate
         start, end = min(d for d, _ in flows), max(d for d, _ in flows)
         for trade_date, maturity in roll_schedule(start, end, tenor_months):
             exposure = nav_at(flows, rate, trade_date, include_same_day=False)
-            notional = abs(exposure) * hedge_ratio
+            notional = abs(exposure)
             if notional < 0.01:
                 continue
             side = TradeSide.SELL if exposure > 0 else TradeSide.BUY
@@ -86,7 +83,6 @@ def generate_hedges(
                     notional_local=round(notional, 2),
                     trade_date=trade_date,
                     maturity_date=maturity,
-                    hedge_ratio=hedge_ratio,
                     reference_rate=fx,
                     notional_base=round(notional * fx, 2),
                 )

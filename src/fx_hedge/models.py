@@ -2,13 +2,14 @@
 
 Validation strategy
 -------------------
-* ``CashflowRecord`` validators run in ``mode="before"`` and delegate to the
-  pure parsers in :mod:`fx_hedge.cleaning`.
-* Deterministic corrections (typo map, date normalisation, amount formatting)
-  are *recorded* through the validation context (``context={"issues": [...]}``)
-  so that nothing is fixed silently.
-* Anything that cannot be fixed deterministically raises, producing a
-  ``ValidationError`` that the ingestion layer turns into a REJECTED issue.
+* Field names mirror the file's column headers (``Fund Name`` -> ``fund_name``).
+* Fields with known dirty values (dates, currencies) have ``mode="before"``
+  validators that call the parsers in :mod:`fx_hedge.cleaning`. Every other
+  field relies on Pydantic's own type checks.
+* Corrections are *recorded* through the validation context
+  (``context={"issues": [...]}``) so nothing is fixed silently.
+* Anything that cannot be fixed raises, producing a ``ValidationError`` that
+  the ingestion layer turns into a REJECTED issue.
 """
 
 from __future__ import annotations
@@ -40,10 +41,6 @@ __all__ = [
     "TradeSide",
 ]
 
-#: Base amounts in the sample are rounded to whole units, so a base-currency
-#: position can differ from its local amount by < 1 unit.
-SAME_CCY_TOLERANCE = 1.0
-
 
 class DataIssue(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -55,17 +52,17 @@ class DataIssue(BaseModel):
     raw_value: str | None = None
 
 
-def _record(info: ValidationInfo, field: str, raw: Any, note: str | None) -> None:
+def _record(info: ValidationInfo, raw: Any, note: str | None) -> None:
+    """Log a correction made by a field validator as a CORRECTED issue."""
     if note is None or not info.context:
         return
     issues = info.context.get("issues")
     if issues is None:
         return
-    row_id = info.context.get("row_id")
     issues.append(
         DataIssue(
-            row_id=row_id,
-            field=field,
+            row_id=info.context.get("row_id"),
+            field=info.field_name,
             severity=Severity.CORRECTED,
             message=note,
             raw_value=None if raw is None else str(raw),
@@ -74,93 +71,56 @@ def _record(info: ValidationInfo, field: str, raw: Any, note: str | None) -> Non
 
 
 class CashflowRecord(BaseModel):
-    """One validated projected cashflow."""
+    """One validated projected cashflow (one row of the client file)."""
 
-    model_config = ConfigDict(frozen=True, str_strip_whitespace=False)
+    model_config = ConfigDict(frozen=True)
 
-    row_id: int = Field(gt=0)
+    id: int = Field(gt=0)
     fund_name: str
-    cashflow_date: dt.date
+    date: dt.date
     cashflow_type: CashflowType
-    local_currency: str = Field(pattern=r"^[A-Z]{3}$")
-    amount_local: float
-    amount_base: float
-    base_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    local_currency: str
+    cashflow_amount_local: float = Field(allow_inf_nan=False)
+    cashflow_amount_base: float = Field(allow_inf_nan=False)
+    base_currency: str
 
     # -- field-level cleaning -------------------------------------------------
 
-    @field_validator("row_id", mode="before")
-    @classmethod
-    def _row_id(cls, v: Any) -> int:
-        if isinstance(v, bool):
-            raise ValueError("row id must be an integer")
-        if isinstance(v, float):
-            if not v.is_integer():
-                raise ValueError(f"row id must be an integer, got {v!r}")
-            return int(v)
-        if isinstance(v, str):
-            s = v.strip()
-            if not s.isdigit():
-                raise ValueError(f"row id must be an integer, got {v!r}")
-            return int(s)
-        return v
-
-    @field_validator("fund_name", mode="before")
-    @classmethod
-    def _fund_name(cls, v: Any, info: ValidationInfo) -> str:
-        value, note = cleaning.clean_text(v, "fund name")
-        _record(info, "fund_name", v, note)
-        return value
-
-    @field_validator("cashflow_date", mode="before")
+    @field_validator("date", mode="before")
     @classmethod
     def _date(cls, v: Any, info: ValidationInfo) -> dt.date:
         value, note = cleaning.parse_date(v)
-        _record(info, "cashflow_date", v, note)
-        return value
-
-    @field_validator("cashflow_type", mode="before")
-    @classmethod
-    def _type(cls, v: Any, info: ValidationInfo) -> CashflowType:
-        value, note = cleaning.parse_cashflow_type(v)
-        _record(info, "cashflow_type", v, note)
+        _record(info, v, note)
         return value
 
     @field_validator("local_currency", "base_currency", mode="before")
     @classmethod
-    def _ccy(cls, v: Any, info: ValidationInfo) -> str:
+    def _currency(cls, v: Any, info: ValidationInfo) -> str:
         value, note = cleaning.parse_currency(v)
-        _record(info, info.field_name or "currency", v, note)
-        return value
-
-    @field_validator("amount_local", "amount_base", mode="before")
-    @classmethod
-    def _amount(cls, v: Any, info: ValidationInfo) -> float:
-        value, note = cleaning.parse_amount(v)
-        _record(info, info.field_name or "amount", v, note)
+        _record(info, v, note)
         return value
 
     # -- cross-field business rules -------------------------------------------
 
     @model_validator(mode="after")
     def _business_rules(self) -> "CashflowRecord":
-        if self.amount_local == 0:
+        local, base = self.cashflow_amount_local, self.cashflow_amount_base
+        if local == 0:
             raise ValueError("zero cashflow amount")
+        if base == 0:
+            raise ValueError("zero base amount")
         expected_negative = self.cashflow_type is CashflowType.INVESTMENT
-        if (self.amount_local < 0) != expected_negative:
+        if (local < 0) != expected_negative:
             raise ValueError(
                 f"sign convention violated: {self.cashflow_type.value} must be "
-                f"{'negative' if expected_negative else 'positive'}, got {self.amount_local:,.2f}"
+                f"{'negative' if expected_negative else 'positive'}, got {local:,.2f}"
             )
-        if (self.amount_base < 0) != (self.amount_local < 0) or self.amount_base == 0:
+        if (base < 0) != (local < 0):
             raise ValueError("local and base amounts have inconsistent signs")
-        if (
-            self.local_currency == self.base_currency
-            and abs(self.amount_local - self.amount_base) > SAME_CCY_TOLERANCE
-        ):
+        if self.local_currency == self.base_currency and local != base:
             raise ValueError(
                 "local and base currency are identical but amounts differ "
-                f"({self.amount_local:,.2f} vs {self.amount_base:,.2f})"
+                f"({local:,.2f} vs {base:,.2f})"
             )
         return self
 
@@ -169,12 +129,7 @@ class CashflowRecord(BaseModel):
     @property
     def implied_fx_rate(self) -> float:
         """Base units per one unit of local currency, as embedded in the projection."""
-        return self.amount_base / self.amount_local
-
-    @property
-    def position_key(self) -> tuple[str, str]:
-        """The sample has no deal id; one deal per (fund, currency) is assumed."""
-        return (self.fund_name, self.local_currency)
+        return self.cashflow_amount_base / self.cashflow_amount_local
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +186,7 @@ class FundAnalytics(BaseModel):
 
 
 class HedgeTrade(BaseModel):
-    """A recommended FX forward. Notional is in the exposure (local) currency."""
+    """A recommended FX forward at 100% of NAV. Notional is in the exposure (local) currency."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -243,7 +198,6 @@ class HedgeTrade(BaseModel):
     notional_local: float = Field(ge=0)
     trade_date: dt.date
     maturity_date: dt.date
-    hedge_ratio: float
     reference_rate: float
     notional_base: float
     pricing_source: str = "projection_implied_spot"

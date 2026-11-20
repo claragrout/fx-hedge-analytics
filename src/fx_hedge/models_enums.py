@@ -15,8 +15,7 @@ class Severity(str, Enum):
     """How a data-quality issue was resolved."""
 
     CORRECTED = "corrected"  # value was fixed deterministically; row kept
-    WARNING = "warning"  # row kept, but a human should look at it
-    REJECTED = "rejected"  # row quarantined, excluded from analytics
+    REJECTED = "rejected"  # row excluded from analytics
 
 
 class TradeSide(str, Enum):

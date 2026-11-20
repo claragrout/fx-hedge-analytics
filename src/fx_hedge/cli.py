@@ -25,7 +25,6 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Fund risk analytics & FX hedge recommendations")
     p.add_argument("path", type=Path, help="cashflow file (.csv or .xlsx)")
     p.add_argument("--fund", default="Fund I")
-    p.add_argument("--hedge-ratio", type=float, default=1.0)
     p.add_argument("--out", type=Path, default=None, help="directory for CSV/JSON outputs")
     args = p.parse_args(argv)
 
@@ -49,8 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         for pt in c.nav_schedule:
             print(f"  {pt.nav_date} {_fmt(pt.cashflow_local)} {_fmt(pt.nav_local)} {_fmt(pt.nav_ex_local)} {_fmt(pt.nav_base)}")
 
-    hedges = generate_hedges(result.records, fa, hedge_ratio=args.hedge_ratio)
-    print(f"\nHedge recommendations ({len(hedges)} forwards, {args.hedge_ratio:.0%} of NAV, 3M rolling)")
+    hedges = generate_hedges(result.records, fa)
+    print(f"\nHedge recommendations ({len(hedges)} forwards, 100% of NAV, 3M rolling)")
     for h in hedges:
         print(f"  {h.trade_id} {h.trade_date} -> {h.maturity_date} {h.side.value} "
               f"{h.exposure_currency} {h.notional_local:>16,.2f} / BUY {h.base_currency} {h.notional_base:>16,.2f}")

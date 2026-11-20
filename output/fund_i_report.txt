@@ -1,15 +1,8 @@
 Read 126 rows -> 126 valid records
   corrected 3
     row   17 local_currency  corrected currency typo 'GPB' -> 'GBP'
-    row   21 cashflow_date   normalised date ' 30/09/2030  00:00:00' -> 2030-09-30 (format '%d/%m/%Y %H:%M:%S')
-    row   51 cashflow_date   normalised date '30/09/2027  00:00:00`' -> 2027-09-30 (format '%d/%m/%Y %H:%M:%S')
-  warning   6
-    row None __position__    position Fund I/GBP: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection
-    row None __position__    position Fund I/EUR: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection
-    row None __position__    position Fund I/USD: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection
-    row None __position__    position Fund II/GBP: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection
-    row None __position__    position Fund II/EUR: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection
-    row None __position__    position Fund II/USD: no interest at maturity 2030-09-30; last coupon 2030-06-30 (19 coupons). Final period's interest may be missing from the projection
+    row   21 date            normalised date ' 30/09/2030  00:00:00' -> 2030-09-30
+    row   51 date            normalised date '30/09/2027  00:00:00`' -> 2027-09-30
   rejected  0
 
 Fund I (base EUR)

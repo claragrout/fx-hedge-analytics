@@ -57,7 +57,7 @@ class TestXirr:
 
     def test_npv_at_irr_is_zero(self):
         recs = bond_records()
-        flows = [(r.cashflow_date, r.amount_local) for r in recs]
+        flows = [(r.date, r.cashflow_amount_local) for r in recs]
         assert xnpv(xirr(flows), flows) == pytest.approx(0.0, abs=1e-6)
 
 
@@ -74,7 +74,7 @@ class TestNavSchedule:
     def test_roll_forward_identity(self):
         """NAV_ex(t_i) grown at the IRR equals NAV(t_{i+1}): the NAV accretes at the IRR."""
         recs = bond_records()
-        irr = xirr([(r.cashflow_date, r.amount_local) for r in recs])
+        irr = xirr([(r.date, r.cashflow_amount_local) for r in recs])
         s = nav_schedule(recs, irr)
         for a, b in zip(s, s[1:]):
             grown = a.nav_ex_local * (1 + irr) ** year_fraction(a.nav_date, b.nav_date)
@@ -88,12 +88,12 @@ class TestNavSchedule:
         recs = bond_records()
         mid = dt.date(2025, 5, 15)
         s = nav_schedule(recs, dates=[mid])
-        flows = [(r.cashflow_date, r.amount_local) for r in recs]
+        flows = [(r.date, r.cashflow_amount_local) for r in recs]
         assert s[0].nav_local == pytest.approx(nav_at(flows, xirr(flows), mid))
         assert s[0].cashflow_local == 0.0
 
     def test_rejects_mixed_positions(self):
-        with pytest.raises(ValueError, match="single position"):
+        with pytest.raises(ValueError, match="one fund and currency"):
             nav_schedule(bond_records(ccy="GBP") + bond_records(ccy="USD"))
 
 

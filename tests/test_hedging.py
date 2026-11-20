@@ -76,21 +76,6 @@ class TestFundIHedges:
         assert not {h.trade_id for h in hedges} & {h.trade_id for h in v2}
 
 
-def test_hedge_ratio_scales_notional():
-    recs = bond_records()
-    fa = compute_fund_analytics(recs, "Fund T")
-    full = generate_hedges(recs, fa, hedge_ratio=1.0)
-    half = generate_hedges(recs, fa, hedge_ratio=0.5)
-    for f, h in zip(full, half):
-        assert h.notional_local == pytest.approx(f.notional_local / 2, abs=0.01)
-
-
-def test_invalid_hedge_ratio():
-    recs = bond_records()
-    with pytest.raises(ValueError):
-        generate_hedges(recs, compute_fund_analytics(recs, "Fund T"), hedge_ratio=3.0)
-
-
 def test_base_only_fund_needs_no_hedges():
     recs = bond_records(ccy="EUR")
     assert generate_hedges(recs, compute_fund_analytics(recs, "Fund T")) == []
@@ -106,8 +91,9 @@ def test_net_short_exposure_buys_local():
         ("Investment", add_months(base, 6), -60.0),
     ]
     recs = [
-        CashflowRecord(row_id=i + 1, fund_name="Fund T", cashflow_date=d, cashflow_type=t,
-                       local_currency="USD", amount_local=a, amount_base=a * 0.9, base_currency="EUR")
+        CashflowRecord(id=i + 1, fund_name="Fund T", date=d.strftime("%d/%m/%Y 00:00"), cashflow_type=t,
+                       local_currency="USD", cashflow_amount_local=a, cashflow_amount_base=a * 0.9,
+                       base_currency="EUR")
         for i, (t, d, a) in enumerate(rows)
     ]
     fa = compute_fund_analytics(recs, "Fund T")
