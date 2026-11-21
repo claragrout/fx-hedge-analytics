@@ -190,7 +190,6 @@ class HedgeTrade(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    trade_id: str
     fund_name: str
     exposure_currency: str
     base_currency: str

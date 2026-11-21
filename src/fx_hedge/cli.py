@@ -48,10 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         for pt in c.nav_schedule:
             print(f"  {pt.nav_date} {_fmt(pt.cashflow_local)} {_fmt(pt.nav_local)} {_fmt(pt.nav_ex_local)} {_fmt(pt.nav_base)}")
 
-    hedges = generate_hedges(result.records, fa)
+    hedges = generate_hedges(fa)
     print(f"\nHedge recommendations ({len(hedges)} forwards, 100% of NAV, 3M rolling)")
     for h in hedges:
-        print(f"  {h.trade_id} {h.trade_date} -> {h.maturity_date} {h.side.value} "
+        print(f"  {h.trade_date} -> {h.maturity_date} {h.side.value} "
               f"{h.exposure_currency} {h.notional_local:>16,.2f} / BUY {h.base_currency} {h.notional_base:>16,.2f}")
 
     if args.out:

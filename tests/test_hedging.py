@@ -3,41 +3,15 @@ import datetime as dt
 import pytest
 
 from fx_hedge.analytics import compute_fund_analytics
-from fx_hedge.hedging import add_months, generate_hedges, roll_schedule
+from fx_hedge.hedging import generate_hedges
 from fx_hedge.models import CashflowRecord, TradeSide
 
-from .conftest import bond_records
-
-
-@pytest.mark.parametrize(
-    "d, n, expected",
-    [
-        (dt.date(2025, 9, 30), 3, dt.date(2025, 12, 31)),
-        (dt.date(2025, 12, 31), 3, dt.date(2026, 3, 31)),
-        (dt.date(2026, 3, 31), 3, dt.date(2026, 6, 30)),
-        (dt.date(2025, 11, 30), 3, dt.date(2026, 2, 28)),
-        (dt.date(2025, 1, 15), 3, dt.date(2025, 4, 15)),
-        (dt.date(2024, 1, 31), 1, dt.date(2024, 2, 29)),
-    ],
-)
-def test_add_months(d, n, expected):
-    assert add_months(d, n) == expected
-
-
-def test_roll_schedule_contiguous():
-    windows = roll_schedule(dt.date(2025, 9, 30), dt.date(2026, 9, 30))
-    assert windows[0] == (dt.date(2025, 9, 30), dt.date(2025, 12, 31))
-    assert windows[-1][1] == dt.date(2026, 9, 30)
-    assert all(a[1] == b[0] for a, b in zip(windows, windows[1:]))
-
-
-def test_roll_schedule_stub_capped_at_end():
-    assert roll_schedule(dt.date(2025, 9, 30), dt.date(2025, 11, 15))[-1] == (dt.date(2025, 9, 30), dt.date(2025, 11, 15))
+from .conftest import QUARTER_ENDS, bond_records
 
 
 @pytest.fixture(scope="module")
-def hedges(sample_result, fund1):
-    return generate_hedges(sample_result.records, fund1)
+def hedges(fund1):
+    return generate_hedges(fund1)
 
 
 class TestFundIHedges:
@@ -45,13 +19,17 @@ class TestFundIHedges:
         assert {h.exposure_currency for h in hedges} == {"GBP", "USD"}
         assert all(h.base_currency == "EUR" for h in hedges)
 
-    def test_quarterly_rolls_cover_life(self, hedges):
+    def test_rolls_follow_cashflow_dates(self, hedges, fund1):
         for ccy in ("GBP", "USD"):
             hs = [h for h in hedges if h.exposure_currency == ccy]
+            dates = [p.nav_date for p in fund1.currency(ccy).nav_schedule]
             assert len(hs) == 20
-            assert hs[0].trade_date == dt.date(2025, 9, 30)
-            assert hs[-1].maturity_date == dt.date(2030, 9, 30)
-            assert all(a.maturity_date == b.trade_date for a, b in zip(hs, hs[1:]))
+            assert [(h.trade_date, h.maturity_date) for h in hs] == list(zip(dates, dates[1:]))
+
+    def test_rolls_are_quarter_end_to_quarter_end(self, hedges):
+        assert hedges[0].trade_date == dt.date(2025, 9, 30)
+        assert hedges[0].maturity_date == dt.date(2025, 12, 31)
+        assert hedges[-1].maturity_date == dt.date(2030, 9, 30)
 
     def test_notional_is_100pct_of_nav_ex_flow(self, hedges, fund1):
         for ccy in ("GBP", "USD"):
@@ -66,29 +44,19 @@ class TestFundIHedges:
         assert first["USD"].notional_local == pytest.approx(200_000_000, abs=0.01)
         assert first["GBP"].notional_base == pytest.approx(114_573_786, abs=1)
 
-    def test_trade_ids_deterministic_and_unique(self, sample_result, fund1, hedges):
-        again = generate_hedges(sample_result.records, fund1)
-        assert [h.trade_id for h in hedges] == [h.trade_id for h in again]
-        assert len({h.trade_id for h in hedges}) == len(hedges)
-
-    def test_new_projection_version_new_ids(self, sample_result, fund1, hedges):
-        v2 = generate_hedges(sample_result.records, fund1, projection_version="v2")
-        assert not {h.trade_id for h in hedges} & {h.trade_id for h in v2}
-
 
 def test_base_only_fund_needs_no_hedges():
     recs = bond_records(ccy="EUR")
-    assert generate_hedges(recs, compute_fund_analytics(recs, "Fund T")) == []
+    assert generate_hedges(compute_fund_analytics(recs, "Fund T")) == []
 
 
 def test_net_short_exposure_buys_local():
-    # A position whose remaining value is negative (e.g. a future funding
-    # commitment exceeding inflows) is hedged by BUYING the local currency forward.
-    base = dt.date(2025, 3, 31)
+    # After the second date the only remaining flow is an outflow, so the
+    # remaining value is negative and the hedge BUYS the local currency.
     rows = [
-        ("Investment", base, -100.0),
-        ("Interest", add_months(base, 3), 200.0),
-        ("Investment", add_months(base, 6), -60.0),
+        ("Investment", QUARTER_ENDS[0], -100.0),
+        ("Interest", QUARTER_ENDS[1], 200.0),
+        ("Investment", QUARTER_ENDS[2], -60.0),
     ]
     recs = [
         CashflowRecord(id=i + 1, fund_name="Fund T", date=d.strftime("%d/%m/%Y 00:00"), cashflow_type=t,
@@ -96,6 +64,5 @@ def test_net_short_exposure_buys_local():
                        base_currency="EUR")
         for i, (t, d, a) in enumerate(rows)
     ]
-    fa = compute_fund_analytics(recs, "Fund T")
-    hedges = generate_hedges(recs, fa)
+    hedges = generate_hedges(compute_fund_analytics(recs, "Fund T"))
     assert hedges[-1].side is TradeSide.BUY

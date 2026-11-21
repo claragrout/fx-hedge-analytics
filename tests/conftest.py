@@ -37,6 +37,14 @@ def make_record(row_id: int = 1, **overrides) -> CashflowRecord:
     return CashflowRecord.model_validate(data)
 
 
+#: Consecutive quarter-ends, as in the sample data.
+QUARTER_ENDS = [
+    dt.date(2025, 3, 31), dt.date(2025, 6, 30), dt.date(2025, 9, 30), dt.date(2025, 12, 31),
+    dt.date(2026, 3, 31), dt.date(2026, 6, 30), dt.date(2026, 9, 30), dt.date(2026, 12, 31),
+    dt.date(2027, 3, 31),
+]
+
+
 def bond_records(
     fund: str = "Fund T",
     ccy: str = "GBP",
@@ -44,17 +52,12 @@ def bond_records(
     fx: float = 1.15,
     principal: float = 1_000_000.0,
     coupon: float = 25_000.0,
-    quarters: int = 8,
-    start: dt.date = dt.date(2025, 3, 31),
 ) -> list[CashflowRecord]:
-    """A simple bullet loan: investment, quarterly coupons, coupon + principal at maturity."""
-    from fx_hedge.hedging import add_months
-
+    """A simple 2-year bullet loan: investment, 8 quarterly coupons, principal with the last coupon."""
+    start, *coupon_dates = QUARTER_ENDS
     rows = [("Investment", start, -principal)]
-    for q in range(1, quarters + 1):
-        d = add_months(start, 3 * q)
-        rows.append(("Interest", d, coupon))
-    rows.append(("Principal Repayment", add_months(start, 3 * quarters), principal))
+    rows += [("Interest", d, coupon) for d in coupon_dates]
+    rows.append(("Principal Repayment", coupon_dates[-1], principal))
     rate = 1.0 if ccy == base else fx
     return [
         CashflowRecord(
