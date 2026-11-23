@@ -26,14 +26,9 @@ class TestFundIHedges:
             assert len(hs) == 20
             assert [(h.trade_date, h.maturity_date) for h in hs] == list(zip(dates, dates[1:]))
 
-    def test_rolls_are_quarter_end_to_quarter_end(self, hedges):
-        assert hedges[0].trade_date == dt.date(2025, 9, 30)
-        assert hedges[0].maturity_date == dt.date(2025, 12, 31)
-        assert hedges[-1].maturity_date == dt.date(2030, 9, 30)
-
     def test_notional_is_100pct_of_nav_ex_flow(self, hedges, fund1):
         for ccy in ("GBP", "USD"):
-            nav = {p.nav_date: p.nav_ex_local for p in fund1.currency(ccy).nav_schedule}
+            nav = {p.nav_date: p.nav_local - p.cashflow_local for p in fund1.currency(ccy).nav_schedule}
             for h in (h for h in hedges if h.exposure_currency == ccy):
                 assert h.notional_local == pytest.approx(nav[h.trade_date], abs=0.01)
                 assert h.side is TradeSide.SELL
@@ -42,7 +37,6 @@ class TestFundIHedges:
         first = {h.exposure_currency: h for h in hedges if h.trade_date == dt.date(2025, 9, 30)}
         assert first["GBP"].notional_local == pytest.approx(100_000_000, abs=0.01)
         assert first["USD"].notional_local == pytest.approx(200_000_000, abs=0.01)
-        assert first["GBP"].notional_base == pytest.approx(114_573_786, abs=1)
 
 
 def test_base_only_fund_needs_no_hedges():

@@ -1,17 +1,3 @@
-"""Pydantic models: the validated cashflow record plus analytics/hedge outputs.
-
-Validation strategy
--------------------
-* Field names mirror the file's column headers (``Fund Name`` -> ``fund_name``).
-* Fields with known dirty values (dates, currencies) have ``mode="before"``
-  validators that call the parsers in :mod:`fx_hedge.cleaning`. Every other
-  field relies on Pydantic's own type checks.
-* Corrections are *recorded* through the validation context
-  (``context={"issues": [...]}``) so nothing is fixed silently.
-* Anything that cannot be fixed raises, producing a ``ValidationError`` that
-  the ingestion layer turns into a REJECTED issue.
-"""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -149,24 +135,16 @@ class NavPoint(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    fund_name: str
-    currency: str
     nav_date: dt.date
     cashflow_local: float
     nav_local: float
-    nav_ex_local: float
-    fx_rate: float
-    nav_base: float
-    nav_ex_base: float
 
 
 class CurrencyAnalytics(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    fund_name: str
     currency: str
     irr: float
-    irr_base: float
     nav_schedule: list[NavPoint]
 
 
@@ -197,9 +175,6 @@ class HedgeTrade(BaseModel):
     notional_local: float = Field(ge=0)
     trade_date: dt.date
     maturity_date: dt.date
-    reference_rate: float
-    notional_base: float
-    pricing_source: str = "projection_implied_spot"
 
     @model_validator(mode="after")
     def _dates(self) -> "HedgeTrade":

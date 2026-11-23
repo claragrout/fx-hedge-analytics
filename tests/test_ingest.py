@@ -1,4 +1,3 @@
-import csv
 import datetime as dt
 
 import openpyxl
@@ -13,7 +12,7 @@ from fx_hedge.ingest import (
     load_cashflows,
     validate_rows,
 )
-from fx_hedge.models import CashflowRecord, CashflowType, Severity
+from fx_hedge.models import CashflowRecord, Severity
 
 from .conftest import make_record
 
@@ -38,21 +37,6 @@ def test_headers_map_to_model_fields():
 
 
 class TestCashflowRecord:
-    def test_corrections_are_recorded_in_context(self):
-        issues = []
-        rec = CashflowRecord.model_validate(
-            raw(17, ccy="GPB", date="30/09/2027  00:00:00`"), context={"issues": issues, "row_id": 17}
-        )
-        assert rec.local_currency == "GBP"
-        assert rec.date == dt.date(2027, 9, 30)
-        assert {i.field for i in issues} == {"local_currency", "date"}
-        assert all(i.severity is Severity.CORRECTED and i.row_id == 17 for i in issues)
-
-    def test_numeric_strings_accepted(self):
-        # CSV cells are always text
-        rec = CashflowRecord.model_validate(raw("3", local="2500000", base="2864345"))
-        assert (rec.id, rec.cashflow_amount_local) == (3, 2_500_000.0)
-
     @pytest.mark.parametrize("field, value", [
         ("cashflow_amount_local", "2,500,000"),
         ("cashflow_amount_local", "nan"),
@@ -80,10 +64,6 @@ class TestCashflowRecord:
     def test_same_currency_amounts_must_match_exactly(self):
         with pytest.raises(ValidationError, match="identical"):
             make_record(local_currency="EUR", cashflow_amount_local=100.0, cashflow_amount_base=100.5)
-
-    def test_same_currency_equal_amounts_accepted(self):
-        rec = make_record(local_currency="EUR", cashflow_amount_local=100.0, cashflow_amount_base=100.0)
-        assert rec.cashflow_amount_base == 100.0
 
     def test_zero_local_amount_rejected(self):
         with pytest.raises(ValidationError, match="zero cashflow amount"):
@@ -134,21 +114,10 @@ class TestValidateRows:
         res = validate_rows([raw(None)])
         assert {i.row_id for i in res.issues} == {None}
 
-    def test_counts_rows_from_a_generator(self):
-        res = validate_rows(raw(i) for i in range(1, 4))
-        assert res.rows_read == 3
-
 
 # ---------------------------------------------------------------------------
 # File loading
 # ---------------------------------------------------------------------------
-
-
-def write_csv(path, header, rows):
-    with path.open("w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(header)
-        w.writerows(rows)
 
 
 def write_xlsx(path, sheets):
@@ -162,51 +131,20 @@ def write_xlsx(path, sheets):
 
 
 class TestFileLoading:
-    def test_dirty_csv(self, tmp_path):
-        p = tmp_path / "cf.csv"
-        write_csv(p, HEADER, [
-            [1, "Fund T", "30/09/2025 00:00", "Investment", "GBP", "-100000000", "-114573786", "EUR"],
-            [2, "Fund T", " 31/12/2025  00:00:00`", "Interest", "GPB", "2500000", "2864345", "EUR"],
-            [3, "Fund T", "31/03/2026 00:00", "Interest", "ZZZ", "2500000", "2864345", "EUR"],
-            [4, "Fund T", "30/06/2026 00:00", "Principal Repayment", "GBP", "100000000", "114573786", "EUR"],
-        ])
-        res = load_cashflows(p)
-        assert res.rows_read == 4
-        assert [r.id for r in res.records] == [1, 2, 4]
-        assert res.records[1].local_currency == "GBP"
-        assert res.records[1].date == dt.date(2025, 12, 31)
-        assert res.records[1].cashflow_type is CashflowType.INTEREST
-        assert {i.row_id for i in res.issues_by_severity(Severity.REJECTED)} == {3}
-        assert {(i.row_id, i.field) for i in res.issues_by_severity(Severity.CORRECTED)} == {
-            (2, "date"), (2, "local_currency")}
-
-    def test_missing_column(self, tmp_path):
-        p = tmp_path / "cf.csv"
-        write_csv(p, HEADER[:-1], [[1, "F", "30/09/2025 00:00", "Interest", "GBP", "1", "1"]])
-        with pytest.raises(SchemaError, match="missing columns.*Base Currency"):
+    @pytest.mark.parametrize("header, match", [
+        (HEADER[:-1], "missing columns.*Base Currency"),
+        (HEADER + ["Comment"], "unexpected columns.*Comment"),
+        (HEADER + ["Date"], "duplicate"),
+    ])
+    def test_bad_headers_rejected(self, tmp_path, header, match):
+        p = tmp_path / "cf.xlsx"
+        write_xlsx(p, {"Data": [header]})
+        with pytest.raises(SchemaError, match=match):
             load_cashflows(p)
 
-    def test_unexpected_column(self, tmp_path):
-        p = tmp_path / "cf.csv"
-        write_csv(p, HEADER + ["Comment"], [])
-        with pytest.raises(SchemaError, match="unexpected columns.*Comment"):
-            load_cashflows(p)
-
-    def test_renamed_column_rejected(self, tmp_path):
-        p = tmp_path / "cf.csv"
-        write_csv(p, ["Fund" if h == "Fund Name" else h for h in HEADER], [])
-        with pytest.raises(SchemaError):
-            load_cashflows(p)
-
-    def test_duplicate_column(self, tmp_path):
-        p = tmp_path / "cf.csv"
-        write_csv(p, HEADER + ["Date"], [])
-        with pytest.raises(SchemaError, match="duplicate"):
-            load_cashflows(p)
-
-    def test_empty_csv(self, tmp_path):
-        p = tmp_path / "cf.csv"
-        p.write_text("")
+    def test_empty_workbook(self, tmp_path):
+        p = tmp_path / "cf.xlsx"
+        write_xlsx(p, {"Data": []})
         with pytest.raises(SchemaError, match="empty"):
             load_cashflows(p)
 

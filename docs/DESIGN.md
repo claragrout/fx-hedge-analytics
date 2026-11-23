@@ -1,495 +1,338 @@
-# Fund-Level Risk Analytics & Hedge Recommendations: Design
+## Part 1:
 
-This document covers Part 1 (schema), Part 2 (pipeline) and Part 4 (trade-offs).
-Part 3 is the code in `src/fx_hedge/`, described in the [README](../README.md).
+Please see below for the data model definitions for the cashflow, NAV schedule, and FX hedge trade entities. Cashlflow record is extracted from the input data, with each row in the data representing a cashflow record. This forms a collection of records. The records present different funds, each fund will hold multiple deals, and each deal within a fund has a different local currency. Additionally, there are no overlapping deals. 
 
-Three principles shape everything below:
+Over time we may need the following:
+- Deal identification number as there may be mulitple deals within a fund with the same local currency. This would mean we could generate a NAV schedule per deal
+- New Cashflow types like arrangement or commitment
+- A different hedge policy as the brief fixes 100% of NAV and 3-month rolls, this could change
+- Once trades are actually placed, we could add an exectution rate to HedgeTrade
 
-1. **Projections are versioned facts, not mutable rows.** Each client upload is
-   an immutable *projection version*. Analytics and hedge recommendations are
-   always computed *from* a specific version, so any number on screen can be
-   traced back to the file that produced it.
-2. **Analytics are pure functions.** IRR/NAV/hedge sizing take inputs
-   (cashflows, methodology parameters, market data snapshot) and return outputs,
-   with no I/O. That makes them testable, cacheable by input hash, and safe to
-   re-run.
-3. **Executed trades are a separate system of record.** A recommendation is a
-   proposal. A booked forward is a contract that later projections cannot rewrite.
+class CashflowType(str, Enum):
+    INVESTMENT = "Investment"
+    INTEREST = "Interest"
+    PRINCIPAL_REPAYMENT = "Principal Repayment"
 
----
 
-## Part 1: Schema design
+class TradeSide(str, Enum):
+    SELL = "SELL"
+    BUY = "BUY"
 
-### Entity overview
 
-```
-Client 1─* Fund 1─* Deal *─1 Currency (local)
-             │        │
-             │        └─* Cashflow *─1 ProjectionVersion *─1 SourceFile
-             │
-             ├─1 Currency (base)
-             │
-             ├─* AnalyticsRun ─* IrrResult      (per fund / per currency)
-             │        │      └─* NavPoint       (per deal or fund×currency, per date)
-             │        │
-             │        └─* HedgeRecommendation ─* HedgeTrade (proposed)
-             │
-             └─* HedgeBookTrade (executed; links back to the HedgeTrade it came from)
-```
+class CashflowRecord(BaseModel):
+    """One projected cashflow: one row of the client file."""
+    id: int                          # row ID from the file (> 0)
+    fund_name: str                   # e.g. "Fund I"
+    date: dt.date                    # date the cashflow is paid
+    cashflow_type: CashflowType      # Investment, Interest or Principal Repayment
+    local_currency: str              # currency of the deal: EUR, GBP or USD
+    cashflow_amount_local: float     # amount in the local currency (investment negative)
+    cashflow_amount_base: float      # same amount in the fund's base currency
+    base_currency: str               # the fund's reporting currency: EUR
 
-* **Fund** has exactly one base (reporting) currency.
-* **Deal** belongs to one fund and has one local currency. A fund's
-  *currency exposure* is the aggregation of its deals by local currency. The sample
-  data has no deal identifier, so the code treats `(fund, currency)` as one
-  deal. In production the client must supply a stable `external_deal_id`.
-* **Currency** is reference data (ISO 4217 code, minor units, active flag)
-  rather than a DB enum, so new currencies need no migration.
-* **Cashflow** belongs to a deal *and* a projection version. The same economic
-  cashflow re-sent in the next upload is a new row under the new version.
-  History is never overwritten.
-* **NavPoint / IrrResult** belong to an **AnalyticsRun**, which pins the exact
-  inputs: projection version, methodology version (day count, NAV
-  convention), and market-data snapshot.
-* **HedgeTrade** (proposed) belongs to a recommendation produced by a run.
-  **HedgeBookTrade** (executed) is the system of record for what is actually
-  live with a counterparty.
 
-### Table sketches (PostgreSQL)
+class NavPoint(BaseModel):
+    """NAV on one date of a currency's schedule."""
+    nav_date: dt.date                # a cashflow date
+    cashflow_local: float            # cashflow paid on nav_date
+    nav_local: float                 # PV at the currency IRR of cashflows on or after nav_date
 
-Amounts are `NUMERIC(20,4)`, never floats, and every amount column carries an
-explicit currency column next to it. All tables have `created_at`/`created_by`;
-they are omitted below for brevity.
 
-```sql
-CREATE TABLE currency (
-    code            CHAR(3) PRIMARY KEY,            -- ISO 4217
-    minor_units     SMALLINT NOT NULL,
-    is_active       BOOLEAN  NOT NULL DEFAULT TRUE
-);
+class CurrencyAnalytics(BaseModel):
+    """The NAV schedule for one fund in one currency, with the IRR it is discounted at."""
+    currency: str                    # the local currency of the schedule
+    irr: float                       # currency-level IRR (annual)
+    nav_schedule: list[NavPoint]     # one NavPoint per cashflow date
 
-CREATE TABLE fund (
-    fund_id         UUID PRIMARY KEY,
-    client_id       UUID NOT NULL REFERENCES client,
-    name            TEXT NOT NULL,
-    base_currency   CHAR(3) NOT NULL REFERENCES currency,
-    UNIQUE (client_id, name)
-);
 
-CREATE TABLE deal (
-    deal_id           UUID PRIMARY KEY,
-    fund_id           UUID NOT NULL REFERENCES fund,
-    external_deal_id  TEXT NOT NULL,                -- client's identifier
-    local_currency    CHAR(3) NOT NULL REFERENCES currency,
-    instrument_type   TEXT,                         -- term loan, unitranche, ...
-    UNIQUE (fund_id, external_deal_id)
-);
+class FundAnalytics(BaseModel):
+    """All analytics for one fund."""
+    fund_name: str
+    base_currency: str                    # the fund's reporting currency: EUR
+    fund_irr: float                       # IRR of all the fund's cashflows in the base currency
+    currencies: list[CurrencyAnalytics]   # one NAV schedule (and IRR) per currency
 
-CREATE TABLE source_file (
-    source_file_id  UUID PRIMARY KEY,
-    client_id       UUID NOT NULL,
-    content_sha256  CHAR(64) NOT NULL,              -- idempotency key
-    object_uri      TEXT NOT NULL,                  -- immutable raw copy (S3/GCS)
-    schema_version  TEXT NOT NULL,                  -- ingestion contract version
-    received_at     TIMESTAMPTZ NOT NULL,
-    UNIQUE (client_id, content_sha256)
-);
 
-CREATE TABLE projection_version (
-    projection_version_id UUID PRIMARY KEY,
-    fund_id         UUID NOT NULL REFERENCES fund,
-    source_file_id  UUID NOT NULL REFERENCES source_file,
-    as_of_date      DATE NOT NULL,                  -- "projection as at"
-    status          TEXT NOT NULL CHECK (status IN
-                    ('validating','validated','needs_review','rejected','superseded')),
-    is_current      BOOLEAN NOT NULL DEFAULT FALSE,
-    supersedes_id   UUID REFERENCES projection_version,
-    UNIQUE (fund_id, source_file_id)
-);
-CREATE UNIQUE INDEX one_current_projection ON projection_version (fund_id) WHERE is_current;
+class HedgeTrade(BaseModel):
+    """One recommended FX forward at 100% of NAV."""
+    fund_name: str
+    exposure_currency: str           # currency being hedged: GBP or USD
+    base_currency: str               # currency received: EUR
+    side: TradeSide                  # direction on the exposure currency
+    notional_local: float            # amount of the exposure currency (>= 0)
+    trade_date: dt.date              # when the forward is agreed
+    maturity_date: dt.date           # when it settles (after trade_date)
 
-CREATE TABLE cashflow (
-    cashflow_id           BIGSERIAL PRIMARY KEY,
-    projection_version_id UUID NOT NULL REFERENCES projection_version,
-    deal_id               UUID NOT NULL REFERENCES deal,
-    source_row_ref        TEXT NOT NULL,            -- e.g. file row id, for lineage
-    cashflow_date         DATE NOT NULL,
-    cashflow_type         TEXT NOT NULL REFERENCES cashflow_type,  -- Investment, Interest, Principal Repayment, (Fee, PIK…)
-    is_actual             BOOLEAN NOT NULL DEFAULT FALSE,          -- realised vs projected
-    amount_local          NUMERIC(20,4) NOT NULL,
-    local_currency        CHAR(3) NOT NULL REFERENCES currency,
-    amount_base           NUMERIC(20,4),            -- as supplied by client (informational)
-    base_currency         CHAR(3) REFERENCES currency,
-    attributes            JSONB NOT NULL DEFAULT '{}',              -- forward-compatible extras
-    UNIQUE (projection_version_id, source_row_ref)
-);
-
-CREATE TABLE data_quality_issue (
-    issue_id              BIGSERIAL PRIMARY KEY,
-    source_file_id        UUID NOT NULL REFERENCES source_file,
-    source_row_ref        TEXT,
-    field                 TEXT NOT NULL,
-    severity              TEXT NOT NULL CHECK (severity IN ('corrected','warning','rejected')),
-    rule_code             TEXT NOT NULL,            -- e.g. CCY_ALIAS, DATE_FORMAT, SIGN_CONVENTION
-    raw_value             TEXT,
-    cleaned_value         TEXT,
-    message               TEXT NOT NULL,
-    resolved_by / resolved_at ...                   -- human review workflow
-);
-
-CREATE TABLE analytics_run (
-    run_id                UUID PRIMARY KEY,
-    fund_id               UUID NOT NULL REFERENCES fund,
-    projection_version_id UUID NOT NULL REFERENCES projection_version,
-    methodology_version   TEXT NOT NULL,            -- e.g. 'xirr-act365f/nav-cumflow@1.2'
-    market_snapshot_id    UUID,                     -- FX spot/forward curve used, if any
-    inputs_hash           CHAR(64) NOT NULL UNIQUE, -- idempotency: same inputs => same run
-    status                TEXT NOT NULL,
-    started_at / finished_at TIMESTAMPTZ
-);
-
-CREATE TABLE irr_result (
-    run_id          UUID REFERENCES analytics_run,
-    scope           TEXT NOT NULL CHECK (scope IN ('fund','currency','deal')),
-    currency        CHAR(3),                        -- NULL for fund scope
-    deal_id         UUID,                           -- set for deal scope
-    irr             NUMERIC(12,10) NOT NULL,        -- annual effective
-    PRIMARY KEY (run_id, scope, currency, deal_id)  -- (use COALESCE'd unique index in practice)
-);
-
-CREATE TABLE nav_point (
-    run_id          UUID NOT NULL REFERENCES analytics_run,
-    fund_id         UUID NOT NULL,
-    currency        CHAR(3) NOT NULL,               -- exposure currency
-    deal_id         UUID,                           -- NULL = currency aggregate
-    nav_date        DATE NOT NULL,
-    cashflow_local  NUMERIC(20,4) NOT NULL,
-    nav_local       NUMERIC(20,4) NOT NULL,         -- spec NAV: PV of flows dated >= t
-    nav_ex_local    NUMERIC(20,4) NOT NULL,         -- PV of flows dated > t (hedgeable exposure)
-    fx_rate         NUMERIC(18,10) NOT NULL,
-    nav_base        NUMERIC(20,4) NOT NULL,
-    PRIMARY KEY (run_id, currency, deal_id, nav_date)
-);
-
-CREATE TABLE hedge_recommendation (
-    recommendation_id UUID PRIMARY KEY,
-    run_id          UUID NOT NULL REFERENCES analytics_run,
-    policy          JSONB NOT NULL,                 -- {"hedge_ratio":1.0,"tenor":"3M","instrument":"FX_FORWARD"}
-    hedge_book_version BIGINT NOT NULL,             -- book state it was diffed against
-    status          TEXT NOT NULL CHECK (status IN ('proposed','approved','rejected','expired','executed')),
-    expires_at      TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE hedge_trade (                          -- proposed trades
-    trade_id        TEXT PRIMARY KEY,               -- deterministic hash (see code)
-    recommendation_id UUID NOT NULL REFERENCES hedge_recommendation,
-    fund_id         UUID NOT NULL,
-    action          TEXT NOT NULL CHECK (action IN ('NEW','ROLL','INCREASE','DECREASE','UNWIND')),
-    exposure_currency CHAR(3) NOT NULL,
-    base_currency   CHAR(3) NOT NULL,
-    side            TEXT NOT NULL CHECK (side IN ('BUY','SELL')),   -- on exposure ccy
-    notional_local  NUMERIC(20,4) NOT NULL CHECK (notional_local > 0),
-    trade_date      DATE NOT NULL,
-    maturity_date   DATE NOT NULL CHECK (maturity_date > trade_date),
-    reference_rate  NUMERIC(18,10),
-    replaces_book_trade_id UUID                     -- for ROLL/INCREASE/DECREASE/UNWIND
-);
-
-CREATE TABLE hedge_book_trade (                     -- executed trades: system of record
-    book_trade_id   UUID PRIMARY KEY,
-    fund_id         UUID NOT NULL,
-    source_trade_id TEXT REFERENCES hedge_trade,
-    counterparty_id UUID NOT NULL,
-    external_ref    TEXT NOT NULL,                  -- bank confirmation id
-    side, exposure_currency, base_currency, notional_local, trade_date, maturity_date,
-    executed_rate   NUMERIC(18,10) NOT NULL,
-    status          TEXT NOT NULL CHECK (status IN ('live','matured','unwound','cancelled')),
-    UNIQUE (counterparty_id, external_ref)
-);
-```
-
-The Pydantic models in `src/fx_hedge/models.py` (`CashflowRecord`, `NavPoint`,
-`HedgeTrade`, `DataIssue`) are the application-side contracts for the
-`cashflow`, `nav_point`, `hedge_trade` and `data_quality_issue` tables.
-
-### Key modelling decisions
-
-| Decision | Why |
-|---|---|
-| Cashflows keyed by projection version, not updated in place | Hedges already executed must be explainable against the projection that sized them. You also get "what changed between v3 and v4" diffs for free. |
-| `is_actual` flag on cashflows | Once a coupon is paid, the realised amount replaces the projection. IRR-since-inception mixes actuals (past) with projections (future). |
-| Store both `nav_local` (spec, cum-flow) and `nav_ex_local` | The spec's NAV(0)=0 / NAV(T)=exit convention is good for reporting identities. The hedgeable exposure on a date is the value *after* that date's flow settles. Storing both avoids the UI and the hedge engine disagreeing. |
-| Client-supplied `amount_base` kept as informational only | The platform's own FX source should drive base valuations. The client's figure is used for cross-validation (implied-rate check). |
-| `cashflow_type` and `currency` as reference tables | New types (Fee, PIK interest, Commitment) are an `INSERT`, not a schema migration. |
-| Proposed vs executed trades in separate tables | Different owners, lifecycles and audit requirements. A recommendation can be regenerated, but a booked trade can't. |
-
-### Schema evolution
-
-* **Ingestion contract versioning.** Every file/API payload is validated
-  against a versioned Pydantic model (`schema_version` stored on
-  `source_file`). Header aliases (see `ingest.HEADER_MAP`) absorb cosmetic
-  changes. Unknown columns are accepted with a warning and land in
-  `cashflow.attributes` (JSONB), so a client adding "Facility ID" doesn't break
-  ingestion, and the field can later be promoted to a real column.
-* **Raw retention.** The original file is kept immutable in object storage. If
-  parsing rules improve, any version can be re-parsed and re-validated.
-* **Database migrations: expand → migrate → contract.** These are additive
-  first (nullable column / new table), followed by a backfill, then a switch
-  of readers, then removal of the old column in a later release. Alembic
-  manages them, and no destructive change ships in the same release as the
-  code that stops using it.
-* **Methodology versioning.** `analytics_run.methodology_version` lets you
-  change the day count or NAV convention without silently changing history. Old
-  runs stay reproducible, and new runs are clearly labelled.
-* **API versioning.** Client-facing responses are versioned (`/v1/...`), and
-  breaking changes go to a new version with a deprecation window. Internal
-  events use a schema registry (JSON Schema/Avro) with backward-compatible
-  evolution rules.
-
----
 
 ## Part 2: Pipeline design
-
-### Stages and ownership
-
+ 
+### The pipeline as built
+ 
+The prototype runs as one command per file and fund
+(`python -m fx_hedge <file> --fund "Fund I" --out output`). Each step is a function
+whose output is the next step's input:
+ 
 ```
- ┌─────────────┐   file.received   ┌──────────────────┐ projection.validated ┌──────────────────┐ analytics.completed ┌──────────────────┐
- │  Landing    │ ────────────────▶ │ Ingestion &      │ ──────────────────▶ │ Analytics engine │ ──────────────────▶ │ Hedge engine     │
- │ (upload/API │                   │ validation svc   │                     │ (IRR, NAV)       │                     │ (sizing, diff vs │
- │  /SFTP)     │                   │                  │                     │                  │   market.snapshot ─▶│  live book)      │
- └─────────────┘                   └──────────────────┘                     └──────────────────┘   hedgebook.changed▶└──────────────────┘
-       │ raw file (immutable)          │ cashflow, dq_issue,                    │ analytics_run,                         │ hedge_recommendation,
-       ▼                               │ projection_version                     │ irr_result, nav_point                  │ hedge_trade
-   object store                        ▼                                        ▼                                        ▼
-                                  ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-                                  │  Serving layer: read models / API (read-only over the above, tenant-scoped)                    │
-                                  └──────────────────────────────────────────────────────────────────────────────────────────────┘
+cashflow file (.xlsx )
+   │
+   ▼  1. Read            ingest.read_raw_rows        → raw rows (one dict per row)
+   │                     checks headers and sheets; a bad file stops here (SchemaError)
+   ▼  2. Validate        ingest.validate_rows        → CashflowRecords + DataIssues
+   │                     corrects known errors, rejects rows it can't trust
+   ▼  3. Analytics       analytics.compute_fund_analytics → FundAnalytics
+   │                     fund IRR, currency IRRs, NAV schedule per currency
+   ▼  4. Hedges          hedging.generate_hedges     → HedgeTrades
+   │                     one 3-month forward per non-base currency per roll date
+   ▼  5. Output          cli.main                    → 4 CSV files
+                         1_ingestion_report, 2_irr, 3_nav, 4_hedges
 ```
-
-| Concern | Owns (writes) | Code in this repo |
+ 
+### Trigger mechanism and step dependencies
+ 
+**Dependencies.** The steps form a straight line: each needs the previous one's output
+and nothing else.
+ 
+| Step | Needs | Produces |
 |---|---|---|
-| Landing | `source_file`, raw object | n/a |
-| Ingestion & validation | `projection_version`, `cashflow`, `data_quality_issue` | `cleaning.py`, `models.py`, `ingest.py` |
-| Analytics | `analytics_run`, `irr_result`, `nav_point` | `analytics.py` (pure functions) |
-| Hedge generation | `hedge_recommendation`, `hedge_trade` | `hedging.py` (pure sizing) |
-| Execution / hedge book | `hedge_book_trade` | n/a (OMS / bank connectivity) |
-| Serving | nothing (read-only) | `cli.py` stands in for it here |
-
-Each stage writes only its own tables and communicates through events plus IDs.
-No stage reaches into another's tables to mutate them. The analytics and
-hedge-sizing logic are libraries with no I/O. The services around them handle
-persistence, retries and events. The same library therefore runs in a batch
-worker, in a notebook for analysts, or behind a synchronous "what-if" API call.
-
-### Triggers and dependencies
-
-* **Event-driven (primary).** A new file (UI upload, API post, SFTP drop)
-  emits `file.received`, and each stage emits the event that triggers the next.
-* **Scheduled.** (a) A daily market-data snapshot triggers hedge re-pricing and
-  drift checks. (b) Each roll date (T-n business days before quarter end)
-  triggers generation of roll trades even if no new projection arrived.
-* **Manual.** Analysts can re-run any stage for a given projection version
-  (backfills, methodology change). This is safe because every stage is
-  idempotent.
-
-Implementation: an orchestrator (Dagster/Airflow/Temporal) runs a per-fund
-DAG instance. Alternatively, queue consumers (SQS/Kafka + workers) can be
-chained by events. Funds are independent, so they partition and parallelise
-naturally. Within a fund, runs are serialised with a per-fund lock (or a Kafka
-partition key = `fund_id`), so two projection versions cannot race into the
-hedge engine.
-
-Dependency rules:
-
-```
-validate(projection)        requires: source_file landed
-analytics(projection)       requires: projection.status == 'validated'
-hedges(run)                 requires: analytics_run.status == 'succeeded'
-                                      AND market snapshot for trade date
-                                      AND current hedge book version (read)
-publish(recommendation)     requires: hedges succeeded; supersedes older 'proposed' recs for the fund
-```
-
-### Pseudocode
-
-```python
-# --- Ingestion worker ----------------------------------------------------------
-def on_file_received(evt):
-    sha = evt.content_sha256
-    if source_file_exists(evt.client_id, sha):            # idempotent: duplicate upload
-        return ack()
-    raw_rows = read_raw_rows(evt.object_uri)              # SchemaError -> reject whole file
-    result   = validate_rows(raw_rows)                    # row + dataset rules (see ingest.py)
-
-    with db.transaction():
-        sf = insert_source_file(evt, sha)
-        for fund, recs in group_by_fund(result.records):
-            status = 'validated'
-            if rejected_rows_affect(fund, result) or reject_ratio(fund) > MAX_REJECT_RATIO:
-                status = 'needs_review'                   # gate: never hedge off a partial book
-            pv = insert_projection_version(fund, sf, status)
-            upsert_cashflows(pv, recs)                    # unique (pv, source_row_ref)
-        insert_dq_issues(sf, result.issues)
-        outbox.add('projection.validated', pv.id) for pv with status=='validated'
-        outbox.add('projection.needs_review', ...)  # -> notify client/ops in UI
-    # outbox relay publishes after commit (no lost / phantom events)
-
-# --- Analytics worker ----------------------------------------------------------
-def on_projection_validated(evt):
-    pv       = load_projection_version(evt.id)
-    method   = CURRENT_METHODOLOGY                        # e.g. 'xirr-act365f/nav-cumflow@1'
-    key      = sha256(pv.id, method)
-    if run_exists(key): return ack()                      # idempotent re-delivery
-    with fund_lock(pv.fund_id):
-        cashflows = load_cashflows(pv)                    # actuals + projections
-        fa = compute_fund_analytics(cashflows, pv.fund)   # pure
-        with db.transaction():
-            run = insert_run(pv, method, key)
-            insert_irr_results(run, fa); insert_nav_points(run, fa)
-            mark_current(pv)                              # flips is_current, supersedes previous
-            outbox.add('analytics.completed', run.id)
-
-# --- Hedge worker ---------------------------------------------------------------
-def on_analytics_completed_or_roll_date(evt):
-    run    = latest_successful_run(evt.fund_id)
-    mkt    = market_snapshot(as_of=today)
-    book   = hedge_book(evt.fund_id)                      # live forwards + version
-    target = generate_hedges(run.cashflows, run.analytics, policy)      # pure sizing
-    orders = diff(target, book, tolerance=policy.rebalance_band)        # NEW/ROLL/INCREASE/DECREASE/UNWIND
-    key    = sha256(run.id, mkt.id, book.version, policy)
-    if recommendation_exists(key): return ack()
-    with db.transaction():
-        expire_open_recommendations(evt.fund_id)
-        rec = insert_recommendation(run, policy, book.version, key)
-        insert_hedge_trades(rec, orders)                  # deterministic trade ids
-        outbox.add('hedge.recommendation.proposed', rec.id)
-```
-
+| Read | a file | raw rows |
+| Validate | raw rows | valid `CashflowRecord`s, `DataIssue`s |
+| Analytics | valid records for one fund | `FundAnalytics` (IRRs and NAV schedules) |
+| Hedges | `FundAnalytics` | `HedgeTrade`s |
+| Output | all of the above | report and result files |
+ 
+Read and Validate are linked by a generator, so rows are read and validated one at a
+time and the file is never held in memory twice.
+ 
+**Stopping points.** Two conditions stop the pipeline before analytics:
+- **A bad file** (wrong or missing columns, more than one sheet, empty, unsupported
+  type) raises `SchemaError` during reading, so nothing further runs. This is already
+  how the prototype behaves.
+- **Rejected rows.**If any row is rejected, the
+  pipeline stops after Validate, sends the ingestion report back to the client, and
+  produces no analytics or hedges until a corrected file arrives. Corrections alone
+  (e.g. `GPB` → `GBP`) don't stop it, only rejected.
+**Triggers.**
+- **Prototype:** run manually from the command line.
+- **Production:** the pipeline runs **when a new cashflow file arrives** (uploaded by
+  the client), since a new projection is the only thing that changes the results. It
+  can also be **re-run on demand** for a file already received, e.g. after a code
+  fix. Because the steps are repeatable (see *Idempotency*), a re-run is always safe.
+**Funds are independent.** Analytics and hedges are calculated per fund
+(`compute_fund_analytics(records, fund_name)`), so each fund's results depend only on
+its own cashflows.
+ 
+### Where each piece of logic lives
+ 
+Each concern is in its own module, and the modules communicate only through the
+Pydantic models.
+ 
+| Concern | Module | Responsible for |
+|---|---|---|
+| Ingestion | `ingest.py`, `cleaning.py`, `CashflowRecord` | reading files; checking headers; correcting known errors; rejecting bad rows; logging `DataIssue`s |
+| Analytics | `analytics.py` | IRRs (via `pyxirr`) and NAV schedules from validated records |
+| Hedging | `hedging.py` | turning NAV schedules into forward trades |
+| Output / serving | `cli.py` | arguments; running the steps in order; writing the CSV files |
+ 
+The models between them act as the contract:
+`CashflowRecord` → `FundAnalytics` → `HedgeTrade`.
+ 
+Benefits of this separation:
+- **Each layer can be tested on its own,** as the tests do: the cleaning tests need no
+  analytics, and the analytics and hedging tests start from validated records.
+- **Analytics and hedging are pure functions.** They do no file reading or writing, so
+  the same code could serve a command line, a scheduled job or a web API.
+- **The output can change without touching the calculations.** Replacing the CSV files
+  with database tables or an API changes only `cli.py` (or whatever replaces it).
+ 
 ### Dirty data handling
+ 
+Problems are handled at two levels.
+ 
+**File level: the whole file is rejected** (`SchemaError`) if:
+- its headers are not exactly the expected eight (missing, extra or duplicated columns)
+- an Excel file has more than one worksheet
+- it is empty, or not `.xlsx`
+**Row level: each row is corrected, rejected, or accepted as is.**
+ 
+| Outcome | When | Effect |
+|---|---|---|
+| **Corrected** | a known error with only one possible fix | row kept; logged with the original value |
+| **Rejected** | anything that fails validation | program stops; error on the row logged |
+ 
+The corrections are limited to the errors found in the data:
+- the currency typo `GPB` → `GBP` (row 17)
+- dates with extra spaces, seconds or a trailing backtick, normalised to a plain date
+  (rows 21 and 51)
+Everything else is rejected rather than guessed.
+ 
+Principles:
+- **Never fix silently.** Every correction is recorded as a `DataIssue` with the value
+  as it appeared in the file.
+- **Never guess.** Only errors with a single certain fix are corrected.
+- **Report everything at once.** All errors on a row are collected, so the client can
+  fix them in one pass.
+The ingestion report (`1_fund_i_ingestion_report.csv`) lists every corrected and
+rejected row. For the sample: 126 rows read, 126 valid, 3 corrected, 0 rejected.
+ 
+### Idempotency
+ 
+**Idempotent** means running the pipeline again on the same input gives the same
+result and creates nothing extra.
+ 
+**In the prototype:**
+- every step is deterministic: the same file always produces the same records, IRRs,
+  NAVs and hedges (no random values or timestamps)
+- output files are overwritten, not appended to, so a re-run replaces the previous
+  output rather than duplicating it
+### Pseudocode
+ main(path, fund, out)                                        # cli.py
+    result = load_cashflows(path)
+    analytics = compute_fund_analytics(result.records, fund)
+    hedges = generate_hedges(analytics)
+    write 1_<fund>_ingestion_report.csv   from result.issues (corrected and rejected rows)
+    write 2_<fund>_irr.csv                fund IRR, then one IRR per currency
+    write 3_<fund>_nav.csv                NAV schedule per currency
+    write 4_<fund>_hedges.csv             hedge trades
 
-Rules are tiered by **how safely they can be fixed** (implemented in the code):
 
-| Severity | Meaning | Examples in sample | Effect |
-|---|---|---|---|
-| **corrected** | Deterministic fix with no judgement involved; logged with raw value | `GPB → GBP` (row 17); `' 30/09/2030  00:00:00'` (row 21); `'30/09/2027  00:00:00\`'` (row 51); `"2,500,000"` / `(100)` amounts | Row kept |
-| **warning** | Plausible but suspicious | Implied FX rate outlier; duplicate business key; **no coupon on the maturity date in all 6 positions** | Row kept, surfaced for review |
-| **rejected** | Cannot be fixed without guessing | Unknown currency `XYZ`; ambiguous `2,5`; wrong sign; base ≠ local for same-ccy row; duplicate id | Row quarantined |
-| **file-level** | Contract broken | Missing required column, unreadable file | Whole file rejected |
+load_cashflows(path)                                         # ingest.py
+    return validate_rows(read_raw_rows(path))
 
-Guidelines:
-* **Never fuzzy-match** into financial meaning. Currency fixes come from a
-  reviewed alias table, and the dataset-level implied-FX-rate check then
-  *confirms* each one (row 17's rate matches the GBP position exactly).
-* **Never invent cashflows.** The missing final-period coupon is flagged, not
-  imputed. Only the client knows whether the deal pays it.
-* **Gate downstream on completeness.** If any row of a fund is rejected, that
-  fund's projection goes to `needs_review` and its previous version stays
-  current for hedging. Hedging off a partially loaded book is worse than
-  hedging off yesterday's.
-* **Close the loop.** Issues are persisted with rule codes and shown to the
-  client in the UI ("we corrected 3 values, please confirm"). Recurring
-  corrections can drive per-client parsing profiles (e.g. a client known to
-  send month-first dates).
 
-### Idempotency and delivery semantics
+read_raw_rows(path)                                          # ingest.py (generator)
+    if path is .xlsx:
+        require exactly one worksheet            (otherwise SchemaError)
+        header = first row                       (empty sheet -> SchemaError)
+    else:
+        SchemaError("unsupported file type")
+    fields = check_headers(header)
+    for each remaining row:
+        yield {field: value for field, value in zip(fields, row)}
 
-* **Inputs:** `source_file` is unique on `(client_id, content_sha256)`, so a
-  re-uploaded identical file is a no-op.
-* **Stages:** each stage derives a deterministic key from its inputs
-  (`analytics_run.inputs_hash`, the recommendation key) and short-circuits if
-  it already exists. At-least-once delivery plus idempotent consumers gives
-  effectively-once results.
-* **Writes:** natural-key upserts (`UNIQUE (projection_version_id,
-  source_row_ref)`) and a single transaction per stage. Events go through a
-  **transactional outbox**, so an event is published only if its data
-  committed.
-* **Trades:** `trade_id` is a hash of fund, currency, trade/maturity dates and
-  projection version (`hedging.trade_id`). Re-running produces the same IDs, so
-  a retry can never double-book. The execution layer additionally dedupes on
-  the counterparty's confirmation reference.
 
----
+check_headers(header)                                        # ingest.py
+    if a header is duplicated, missing or not in EXPECTED_HEADERS:
+        SchemaError
+    return each header lower-cased with spaces as underscores
+        e.g. "Cashflow Amount Local" -> "cashflow_amount_local"
 
-## Part 4: Trade-offs
 
-### Serving analytics and hedge recommendations to a client-facing web app
+validate_rows(rows)                                          # ingest.py
+    for each raw row:
+        rows_read += 1
+        row_id = raw "id" if it is a positive integer, else None
+        try:
+            record = CashflowRecord.model_validate(raw)
+                date:      parse_date      -> strip backtick, collapse spaces,
+                                              read dd/mm/yyyy [HH:MM[:SS]], must be midnight
+                currency:  parse_currency  -> EUR/GBP/USD as is; "GPB" -> "GBP"
+                (any correction is logged as a CORRECTED issue)
+                business rules: no zero amounts; investment negative, others positive;
+                                local and base same sign; equal if same currency
+        except ValidationError:
+            log every error on the row as a REJECTED issue
+            skip the row
+        keep record
 
-**Precompute, then serve read models; compute synchronously only for cheap
-what-ifs.**
 
-* **Write side vs read side.** The pipeline above writes normalised results.
-  A serving layer exposes tenant-scoped read models: materialised views or
-  denormalised tables such as `fund_summary(fund_id, as_of, fund_irr, nav_base,
-  hedge_ratio_actual, …)` and `nav_series(fund_id, currency, date, …)`. They
-  are shaped for the screens, so page loads are single indexed reads (ms)
-  regardless of how expensive the analytics were.
-* **API.** A stateless API service (FastAPI) sits behind the gateway:
-  `GET /v1/funds/{id}/analytics?run=latest`,
-  `GET /v1/funds/{id}/nav?currency=GBP`, `GET /v1/funds/{id}/hedges`,
-  `POST /v1/funds/{id}/scenarios` (what-if hedge ratio/tenor). Every response
-  carries `projection_version`, `run_id`, `as_of` and `methodology_version`,
-  so the UI always shows provenance ("based on projections uploaded 14 Nov").
-* **Freshness.** While a new run computes, users keep seeing the last good
-  run with a "recalculating…" badge driven by job status via SSE/WebSocket,
-  never a half-written state. `is_current` flips atomically at the end of the
-  run.
-* **What-if.** Sizing hedges at a different ratio or tenor is a pure function
-  over already-computed NAVs (microseconds), so it runs synchronously in the
-  API process using the same library, with no database writes until the user
-  saves a scenario. Heavy scenarios (e.g. stochastic FX simulations) go to the
-  async job queue and return a job ID.
-* **Multi-tenancy and security.** Use tenant ID in every key, Postgres
-  row-level security as defence in depth, OAuth/OIDC with fund-level
-  permissions, and an audit log of who viewed or approved what.
-  Recommendations require explicit approval (four-eyes for large notionals)
-  before anything flows to execution.
-* **Scale.** The data is small (hundreds of deals × ~20 dates per fund), so
-  Postgres plus a cache (Redis, keyed by `run_id`, so it never goes stale) is
-  plenty. The bottleneck is correctness and auditability, not throughput.
-  Internal analysts query the same tables through a read replica or a
-  warehouse export, so they never load the OLTP primary.
+compute_fund_analytics(records, fund)                        # analytics.py
+    fund_records = records belonging to fund       (none -> error)
+    base = the fund's single base currency         (more than one -> error)
+    for each currency in the fund, in alphabetical order:
+        rows = the fund's cashflows in that currency
+        irr = xirr([(date, cashflow_amount_local) for each row])
+        schedule = nav_schedule(rows, irr)
+    fund_irr = xirr([(date, cashflow_amount_base) for each fund record])
+    return FundAnalytics(fund, base, fund_irr, [currency, irr, schedule for each currency])
 
-**Trade-off accepted:** precomputation adds pipeline complexity and a short lag
-after upload, in exchange for fast, consistent, auditable reads. The
-alternative, computing on request, is simpler but makes every page load depend
-on the analytics code path and makes "what did the client see on 3 Nov?" hard
-to answer.
 
-### Projections revised mid-quarter while hedges are in flight
+xirr(flows)                                                  # analytics.py
+    rate = pyxirr.xirr(dates, amounts)
+    invalid cashflows or no solution -> IRRError
+    return rate
 
-A revised projection changes IRR, then NAV, then the *target* notional. The
-forwards already traded do not change: they are contracts. So the system must
-reconcile the **target** (from the new projection) with the **actual** (the
-live hedge book), rather than regenerate the hedge schedule from scratch.
 
-1. **Version, don't overwrite.** The revision becomes projection v(n+1). The
-   live forwards stay linked to the version that sized them, which preserves
-   the audit trail ("hedged 99.9m on v3; v4 cut NAV to 80m").
-2. **Re-anchor the analytics.** Mid-life, the IRR is computed on *actual*
-   past cashflows plus *revised* future ones. The NAV is then re-based at the
-   revision date, so NAV(0)=0 at inception still holds for the original deal.
-   The new schedule starts from the current NAV, not from zero.
-3. **Diff and apply a tolerance band.** Compute the hedge ratio gap = live notional
-   / new NAV_ex for each currency, then choose:
-   * **Within band** (e.g. 95–105%): do nothing until the next quarterly roll,
-     which re-sizes naturally. This avoids churning trades over noise.
-   * **Outside band:** propose an `INCREASE` (new forward to the *same*
-     maturity as the live one, to keep the roll calendar aligned) or a
-     `DECREASE` (offsetting forward, or a partial unwind with the bank).
-   * **Structural change** (prepayment, default, deal sold): `UNWIND` the
-     hedge. Early termination realises the forward's mark-to-market in cash,
-     so liquidity has to be checked first.
-   * **Date shift** (maturity extended): extend at roll rather than at
-     maturity of the current forward.
-4. **Cost vs tracking error.** Every adjustment costs spread and has a cash
-   impact (a forward settled or unwound at a loss needs cash the fund may
-   not hold). The band, minimum trade size and "wait for roll" policy are
-   per-fund configuration, chosen with the client. They are not hard-coded.
-5. **Concurrency.** A recommendation is generated against a specific
-   `hedge_book_version` and expires. If a trade is executed (book version
-   changes) or a newer projection lands before approval, the recommendation is
-   invalidated and regenerated. Optimistic concurrency stops someone approving
-   a proposal sized against a stale book. Per-fund serialisation in the
-   pipeline prevents two revisions racing.
-6. **Communication.** The UI shows "projection revised; hedge ratio now 118%
-   for GBP; proposed DECREASE 18.4m to 31 Dec". The client approves, and the
-   diff, the reason and the approver are logged.
+nav_schedule(rows, irr)                                      # analytics.py
+    flows = (date, cashflow_amount_local) for each row, sorted by date
+    if any date repeats: error
+    for each (date, cashflow) in flows:
+        nav = present value at irr, on date, of all flows dated on or after date
+              (nav_at, via pyxirr.xnpv), rounded to 2 dp
+        if date is the first date and nav != 0: error    # the brief's NAV(0) = 0 check
+        add NavPoint(date, cashflow, nav)
+    return the NavPoints
+
+
+generate_hedges(analytics)                                   # hedging.py
+    for each currency except the base currency:
+        for each consecutive pair of NAV points (point, next_point):
+            exposure = point.nav_local - point.cashflow_local   # value still held after today's cashflow
+            if abs(exposure) < 0.01: skip
+            side = SELL if exposure > 0 else BUY
+            add HedgeTrade(fund, currency, base, side, abs(exposure),
+                           trade_date = point date, maturity_date = next_point date)
+    return trades sorted by currency, then trade date
+
+
+## Part 4
+
+### Architecting the backend to serve analytics and hedge recommendations to a client facing web-application.
+
+```text
+Client browser
+   │
+   ▼
+Route 53
+   │
+   ▼
+CloudFront (Web app stored in S3)
+   │
+   ▼
+API Gateway ── Cognito (sign-in, per-fund access)
+   │
+   ▼
+Backend API service (Lambda) ──► RDS PostgreSQL (cashflows, IRRs, NAVs, hedges, issues)
+
+Client uploads file ──► S3 (raw files) ──► Eventbridge event ──► Run API on container (Lambda)
+                                                     runs fx_hedge: ingest → analytics → hedges
+```
+
+User requests frontend using route 53 domain name. They authenticate with cognito and are redirected to the frontend. User retrieves presigned URL from backend in GET request and uploads fund data to the presigned url. Once the file has finished uploading, this adds to an SQS queue, 
+
+Tradeoffs
+
+Eventbridge & ECS task vs Lambda
+Gains:
+- Simple setup: S3 triggers lambda directly
+- No servers to maintain, AWS starts the lambda and stops afterwards.
+- Automatic scaling: many uploads result in parallel runs
+- You only pay for invocations, whereas with ECS you pay for every hour that the container is running.
+
+Downside of Lambda:
+- Limits on time, CPU and memory. If calculations get more complicated or more data needs to be processed at once, we would need to move to something like ECS and Eventbridge
+- 15 mins cold start, however starting large containers can take a while.
+- A burst of requests can start hundreds of environments, each wanting its own database connection. RDS Proxy pools those connections. With low traffic client app, it's unlikely to be a problem at first.
+
+API Gateway vs ALB
+Gains:
+- Verifies cognito sign-in token for each request
+- Capping how many requests are accepted, preventing DoS attack
+- Usage per client for REST API only
+- Request validation - rejecting malformed requests before they reach backend
+- Caching - storing responses for time, so repeated requests have lower latency
+
+Downsides of API Gateway:
+- Payload size are capped
+- Requests must complete in 29 seconds - longer requests allowed in ALB however with presigned url for file upload to S3, this isn't something we should be concerned about.
+- ALB can perform health checks of containers. Seeing as we're using a Lambda this isn't concerning.
+
+### Changes to design if cashflow projections are revised mid-quarter and hedges are already in flight
+
+1. Upload: the client's updated data file is saved next to the original, the pipeline stores it as a new version.
+2. Recalculate: the pipeline reruns the calculations on the new figures and works out how much foreign currency the fund now holds, as of the day the update arrived.
+3. Compare: a new step compares that amount with the currency trades already agreed, which are saved in the database:
+- small difference: do nothing now; the next quarterly trade uses the updated amount
+- large difference: suggest an extra trade to make up the shortfall, or one to cancel out the excess
+- major change (e.g. a loan repaid early): suggest ending the existing trade early
+4. Future trades: recalculated only for the quarters after the trades already agreed.
+5. Web app shows the difference and suggests trades.

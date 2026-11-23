@@ -1,13 +1,5 @@
-"""Load the client cashflow file and turn it into validated ``CashflowRecord`` objects.
-
-Rows are read lazily (generators) and validated one at a time, so the file is
-never held in memory as a second, raw copy. A row that fails validation is
-rejected and logged; the rest of the file carries on.
-"""
-
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -57,7 +49,7 @@ def header_to_field(header: str) -> str:
 
 
 def _check_headers(header: list[Any]) -> list[str]:
-    """Require exactly the expected headers; return the matching field names in column order."""
+    """"""
     if len(header) != len(set(header)):
         raise SchemaError(f"duplicate column headers: {header}")
     missing = EXPECTED_HEADERS - set(header)
@@ -70,28 +62,17 @@ def _check_headers(header: list[Any]) -> list[str]:
 
 
 def _rows(fields: list[str], body: Iterable[Iterable[Any]]) -> Iterator[dict[str, Any]]:
-    """Yield each data row as a dict keyed by field name."""
+    """"""
     for values in body:
         yield dict(zip(fields, values))
 
 
 def read_raw_rows(path: str | Path) -> Iterator[dict[str, Any]]:
-    """Yield raw rows from a CSV or XLSX file, one at a time.
-
-    Values are passed through untouched (strings stay strings) so that all
-    cleaning happens in one place: the Pydantic model.
+    """
     """
     path = Path(path)
     suffix = path.suffix.lower()
-    if suffix == ".csv":
-        with path.open(newline="", encoding="utf-8-sig") as fh:
-            reader = csv.reader(fh)
-            try:
-                header = next(reader)
-            except StopIteration as exc:
-                raise SchemaError("empty file") from exc
-            yield from _rows(_check_headers(header), reader)
-    elif suffix == ".xlsx":
+    if suffix == ".xlsx":
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         try:
             if len(wb.worksheets) != 1:
@@ -118,7 +99,7 @@ _ROW_ID = TypeAdapter(PositiveInt)
 
 
 def _best_effort_row_id(value: Any) -> int | None:
-    """The row's id if it is valid, else ``None`` (used only to label issues)."""
+    """"""
     if value is None:
         return None
     try:

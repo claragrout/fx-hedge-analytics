@@ -13,17 +13,17 @@ class TestParseDate:
             (" 30/09/2030  00:00:00", dt.date(2030, 9, 30)),  # sample row 21
             ("30/09/2027  00:00:00`", dt.date(2027, 9, 30)),  # sample row 51
             ("01/02/2026 00:00", dt.date(2026, 2, 1)),  # day-first
+            ("30/09/2025", dt.date(2025, 9, 30)),  # bare date, as in CSV exports
+            ("01/02/2026", dt.date(2026, 2, 1)),  # bare date, day-first
         ],
     )
     def test_accepts(self, raw, expected):
         assert parse_date(raw)[0] == expected
 
-    def test_clean_input_has_no_note(self):
-        assert parse_date("30/09/2025 00:00")[1] is None
-
-    def test_seconds_alone_is_not_a_correction(self):
-        # A valid format with nothing removed is read as-is, not "corrected".
-        assert parse_date("30/09/2025 00:00:00")[1] is None
+    # A valid format with nothing removed is read as-is, not "corrected".
+    @pytest.mark.parametrize("raw", ["30/09/2025 00:00", "30/09/2025", "30/09/2025 00:00:00"])
+    def test_clean_input_has_no_note(self, raw):
+        assert parse_date(raw)[1] is None
 
     @pytest.mark.parametrize("raw", ["30/09/2027  00:00:00`", " 30/09/2030  00:00:00"])
     def test_cleaned_input_has_note(self, raw):
@@ -40,6 +40,8 @@ class TestParseDate:
             "2025-09-30",  # format not in the data
             "30/09/2025 14:30",  # non-midnight time
             "30/09/25 00:00",  # two-digit year -> year 25, outside range
+            "30/09/25",  # bare date with two-digit year
+            "31/02/2026",  # bare date, no such day
         ],
     )
     def test_rejects(self, raw):

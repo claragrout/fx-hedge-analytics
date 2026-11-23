@@ -1,16 +1,3 @@
-"""Parsers for the dirty fields found in the client cashflow file.
-
-Each parser returns ``(value, note)``. ``note`` is ``None`` when the raw
-input was already clean, otherwise it describes the correction applied.
-Input that cannot be fixed raises ``ValueError``, which Pydantic turns into a
-validation error, so the row is rejected.
-
-Only the errors present in the sample data are corrected:
-
-* currency typo ``GPB`` (row 17)
-* dates with extra whitespace, seconds and a trailing backtick (rows 21, 51)
-"""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -40,8 +27,10 @@ def parse_currency(raw: object) -> tuple[str, str | None]:
 # Dates
 # ---------------------------------------------------------------------------
 
-#: Date formats present in the data. Dates are day-first (dd/mm/yyyy).
+#: Accepted date formats. Dates are day-first (dd/mm/yyyy). The xlsx yields a
+#: time component; CSV exports may carry the bare date.
 DATE_FORMATS: tuple[str, ...] = (
+    "%d/%m/%Y",
     "%d/%m/%Y %H:%M",
     "%d/%m/%Y %H:%M:%S",
 )

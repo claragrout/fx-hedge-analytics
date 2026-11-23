@@ -53,11 +53,11 @@ def bond_records(
     principal: float = 1_000_000.0,
     coupon: float = 25_000.0,
 ) -> list[CashflowRecord]:
-    """A simple 2-year bullet loan: investment, 8 quarterly coupons, principal with the last coupon."""
-    start, *coupon_dates = QUARTER_ENDS
+    """A simple 2-year bullet loan: investment, 7 quarterly coupons, then principal (one flow per date, as in the sample)."""
+    start, *coupon_dates, end = QUARTER_ENDS
     rows = [("Investment", start, -principal)]
     rows += [("Interest", d, coupon) for d in coupon_dates]
-    rows.append(("Principal Repayment", coupon_dates[-1], principal))
+    rows.append(("Principal Repayment", end, principal))
     rate = 1.0 if ccy == base else fx
     return [
         CashflowRecord(
